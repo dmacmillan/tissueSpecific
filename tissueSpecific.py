@@ -4,7 +4,17 @@ import sys
 import logging
 import time
 import random
+import colorsys
 from Kleat import *
+from Matrix import *
+
+def mapSamples(samplemap):
+    mapping = {}
+    with open(samplemap, 'r') as f:
+        for line in f:
+            line = line.strip().split('\t')
+            mapping[line[0]] = line[1]
+    return mapping
 
 def centroid(_list):
     return float(sum(_list))/len(_list)
@@ -37,16 +47,14 @@ def iterAHC(_list, linkage='centroid', threshold=15):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Given KLEAT files identify tissue-specific cleavage sites as well as differentially utilized sites')
-    parser.add_argument('-k1', nargs='+', help='One or more KLEAT files to analyze')
-    parser.add_argument('-k2', nargs='+', help='One or more KLEAT files to compare to files in k1')
-    parser.add_argument('-n', '--normalize', action='store_true', help='Enable this to randomly subsample k1 or k2 to both equal the minimum number of samples between the two')
-    parser.add_argument('-a', '--names', nargs=2, default=('k1', 'k2'), help='Name k1 and k2 sets')
+    parser.add_argument('kleats', nargs='+', help='One or more KLEAT files to analyze')
+    parser.add_argument('-e', '--exclude', default=[], nargs='+', help='Tissue types to exclude')
+    parser.add_argument('-s', '--samplemap', default=os.path.dirname(os.path.realpath(__file__))+'/samplemap', help='A file mapping sample names to tissue site')
+    parser.add_argument('-n', '--normalize', action='store_true', help='Enable this to randomly subsample all tissues to equal the minimum number of samples')
     parser.add_argument("-l", "--log", dest="logLevel", default='WARNING', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help='Set the logging level. Default = "WARNING"')
     parser.add_argument('-o', '--outdir', default=os.getcwd(), help='Path to output to. Default is {}'.format(os.getcwd()))
     
     args = parser.parse_args()
-    if not args.k1 or not args.k2:
-        sys.exit('-k1 and -k2 required')
     
     if not os.path.isdir(args.outdir):
         try:
@@ -54,52 +62,71 @@ if __name__ == '__main__':
         except OSError:
             pass
 
-    colours = ('255,0,0', '0,0,255')
-    datasets = dict.fromkeys(args.names)
-    keys = datasets.keys()
-    for i,data in enumerate(datasets):
-        datasets[data] = {'out': open(os.path.join(args.outdir, '{}.bg'.format(data)), 'w')}
-        datasets[data]['out'].write('track type=\'bedGraph\' visibility=\'2\' name=\'{}\' color=\'{}\'\n'.format(data, colours[i]))
-    
     # Logging
-    logging.basicConfig(filename=os.path.join(args.outdir, 'log_{}'.format(os.path.basename(__file__))), level=getattr(logging, args.logLevel))
+    logging.basicConfig(filename=os.path.join(args.outdir, 'log_{}'.format(os.path.basename(__file__))), level=getattr(logging, args.logLevel), filemode='w')
 
-    if args.normalize:
-        if len(args.k1) < len(args.k2):
-            args.k2 = random.sample(args.k2, len(args.k1))
-        else:
-            args.k1 = random.sample(args.k1, len(args.k2))
-    
     kleats = []
-    for k in args.k1:
-        kleats += Kleat.parseKleatFast(k, keys[0])
-    for k in args.k2:
-        kleats += Kleat.parseKleatFast(k, keys[1])
+    mapping = mapSamples(args.samplemap)
+    #logging.debug('mapping: {}'.format(mapping))
+    tissues = {}
+    #tissues = {x[1]:{'file': open(os.path.join(args.outdir, '{}.bg'.format(x[1])), 'w'), 'samples': set()} for x in mapping.items()}
+    #for tissue in args.exclude:
+    #    del(tissues[tissue])
+    n = len(args.kleats)
+    for i,k in enumerate(args.kleats):
+        sample = os.path.basename(k).split('.')[0]
+        tissue = mapping[sample]
+        if tissue in args.exclude:
+            continue
+        if tissue not in tissues:
+            tissues[tissue] = {
+                'file': open(os.path.join(args.outdir, '{}.bg'.format(tissue)), 'w'),
+                'samples': set()
+            }
+        tissues[tissue]['samples'].add(sample)
+        kleats += Kleat.parseKleatFast(k, sample)
+        sys.stdout.write('Processed {}/{}\r'.format(i,n))
+        sys.stdout.flush()
+    print
 
+    logging.debug('tissues: {}'.format(tissues))
+    tkeys = tissues.keys()
+    N = len(tissues)
+    hsv = [(x*1.0/N, 1, 1) for x in range(N)]
+    rgb = map(lambda x: colorsys.hsv_to_rgb(*x), hsv)
+    for i,tissue in enumerate(tissues):
+        tissues[tissue]['file'].write('track type=\'bedGraph\' visibility=\'2\' name=\'{}\' color=\'{}\'\n'.format(tissue, (',').join([str(x*255) for x in rgb[i]])))
+
+    # Normalize
+    if args.normalize:
+        smallest = min([len(tissues[tissue]['samples']) for tissue in tissues])
+        logging.debug('smallest: {}'.format(smallest))
+        keep = set([x for y in [random.sample(tissues[tissue]['samples'], smallest) for tissue in tissues] for x in y])
+        #keep = set([x for x in random.sample(tissues[tissue]['samples'], smallest) for tissue in tissues])
+        kleats = [x for x in kleats if x.name in keep]
+    
     kleats = Kleat.groupKleat(kleats)
 
     for chrom in kleats:
         for gene in kleats[chrom]:
             kleats[chrom][gene] = iterAHC(kleats[chrom][gene])
-            diffs = []
-            for cluster in kleats[chrom][gene]:
-                cdiff = []
-                for data in datasets:
-                    cdiff.append(len([x for x in cluster if x.name == data]))
-                diffs.append(cdiff)
-            diffs = [x[0] - x[1] for x in diffs]
-            _min = min(diffs)
-            _max = max(diffs)
-            if abs(_max - _min) > 10:
-                print gene
-                for data in datasets:
-                    for i,cluster in enumerate(kleats[chrom][gene]):
-                        css = [x.cleavage_site for x in cluster if x.name == data]
-                        if not css:
-                            continue
-                        score = len(css)
-                        cs = int(centroid(css))
-                        datasets[data]['out'].write('{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, score))
-
-    for data in datasets:
-        datasets[data]['out'].close()
+            clusters = kleats[chrom][gene]
+            lclusters = len(clusters)
+            mtx = Matrix(N, lclusters)
+            for i in xrange(mtx.m):
+                tissue = tissues.keys()[i]
+                for j in xrange(mtx.n):
+                    values = [x.cleavage_site for x in clusters[j] if mapping[x.name] == tissue]
+                    if not values:
+                        continue
+                    cs = centroid(values)
+                    score = len(values)
+                    tissues[tissue]['file'].write('{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, score))
+                    mtx.mtx[i][j] = score
+            deltas = Matrix(N, lclusters-1)
+            for i in xrange(deltas.m):
+                for j in xrange(deltas.n):
+                    value = mtx.mtx[i][j+1] - mtx.mtx[i][j]
+                    deltas.mtx[i][j] = value
+                    if value > 7 or value < -7:
+                        print gene
