@@ -67,6 +67,7 @@ if __name__ == '__main__':
 
     kleats = []
     mapping = mapSamples(args.samplemap)
+    logging.debug('mapping: {}'.format(mapping))
     #logging.debug('mapping: {}'.format(mapping))
     tissues = {}
     #tissues = {x[1]:{'file': open(os.path.join(args.outdir, '{}.bg'.format(x[1])), 'w'), 'samples': set()} for x in mapping.items()}
@@ -75,6 +76,7 @@ if __name__ == '__main__':
     n = len(args.kleats)
     for i,k in enumerate(args.kleats):
         sample = os.path.basename(k).split('.')[0]
+        logging.debug('sample: {}'.format(sample))
         tissue = mapping[sample]
         if tissue in args.exclude:
             continue
@@ -85,7 +87,7 @@ if __name__ == '__main__':
             }
         tissues[tissue]['samples'].add(sample)
         kleats += Kleat.parseKleatFast(k, sample)
-        sys.stdout.write('Processed {}/{}\r'.format(i,n))
+        sys.stdout.write('Processed {}/{}\r'.format(i+1,n))
         sys.stdout.flush()
     print
 
@@ -98,12 +100,12 @@ if __name__ == '__main__':
         tissues[tissue]['file'].write('track type=\'bedGraph\' visibility=\'2\' name=\'{}\' color=\'{}\'\n'.format(tissue, (',').join([str(x*255) for x in rgb[i]])))
 
     # Normalize
-    if args.normalize:
-        smallest = min([len(tissues[tissue]['samples']) for tissue in tissues])
-        logging.debug('smallest: {}'.format(smallest))
-        keep = set([x for y in [random.sample(tissues[tissue]['samples'], smallest) for tissue in tissues] for x in y])
+    #if args.normalize:
+    #    smallest = min([len(tissues[tissue]['samples']) for tissue in tissues])
+    #    logging.debug('smallest: {}'.format(smallest))
+    #    keep = set([x for y in [random.sample(tissues[tissue]['samples'], smallest) for tissue in tissues] for x in y])
         #keep = set([x for x in random.sample(tissues[tissue]['samples'], smallest) for tissue in tissues])
-        kleats = [x for x in kleats if x.name in keep]
+    #    kleats = [x for x in kleats if x.name in keep]
     
     kleats = Kleat.groupKleat(kleats)
 
@@ -113,6 +115,10 @@ if __name__ == '__main__':
             clusters = kleats[chrom][gene]
             lclusters = len(clusters)
             mtx = Matrix(N, lclusters)
+            centroids = []
+            for cluster in clusters:
+                values = [x.cleavage_site for x in cluster]
+                centroids.append(centroid(values))
             for i in xrange(mtx.m):
                 tissue = tissues.keys()[i]
                 for j in xrange(mtx.n):
@@ -121,12 +127,17 @@ if __name__ == '__main__':
                         continue
                     cs = centroid(values)
                     score = len(values)
+                    factor = len(tissues[tissue]['samples'])
+                    if args.normalize:
+                        score /= float(factor)
                     tissues[tissue]['file'].write('{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, score))
                     mtx.mtx[i][j] = score
-            deltas = Matrix(N, lclusters-1)
-            for i in xrange(deltas.m):
-                for j in xrange(deltas.n):
-                    value = mtx.mtx[i][j+1] - mtx.mtx[i][j]
-                    deltas.mtx[i][j] = value
-                    if value > 7 or value < -7:
-                        print gene
+            mtx.rownames = [t.replace(' ', '_') for t in tissues.keys()]
+            mtx.colnames = ['c{}_{}'.format(i, int(x)) for i,x in enumerate(centroids)]
+            with open(os.path.join(args.outdir, gene), 'w') as f:
+                f.write(str(mtx))
+#            deltas = Matrix(N, lclusters-1)
+#            for i in xrange(deltas.m):
+#                for j in xrange(deltas.n):
+#                    value = mtx.mtx[i][j+1] - mtx.mtx[i][j]
+#                    deltas.mtx[i][j] = value
