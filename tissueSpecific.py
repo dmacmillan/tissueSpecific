@@ -1,4 +1,4 @@
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import argparse
 import os
@@ -36,6 +36,16 @@ def mapSamples(samplemap):
             mapping[line[0]] = line[1]
     return mapping
 
+def samplemapToTissueCount(samplemap):
+    tissues = {}
+    for sample in samplemap:
+        tissue = samplemap[sample]
+        if tissue not in tissues:
+            tissues[tissue] = 1
+            continue
+        tissues[tissue] += 1
+    return tissues
+
 def centroid(_list):
     return float(sum(_list))/len(_list)
 
@@ -46,7 +56,7 @@ def getListIndexMinMetric(_list, linkage='centroid', metric='euclidian'):
         _min = float('inf')
         for i in xrange(len(_list) - 1):
             if linkage == 'centroid':
-                dist = centroid([x.cleavage_site for x in _list[i+1]]) - centroid([x.cleavage_site for x in _list[i]])
+                dist = centroid([x.end for x in _list[i+1]]) - centroid([x.end for x in _list[i]])
             if dist < _min:
                 index = i
                 _min = dist
@@ -65,36 +75,21 @@ def iterAHC(_list, linkage='centroid', threshold=20):
         index, _min = getListIndexMinMetric(clusters)
     return clusters
 
-#def outputClusters(clusters, tissues):
-#    lclusters = len(clusters)
-#    for i,cluster in enumerate(clusters):
-#        values = [x.cleavage_site for x in cluster]
-#        centroid = centroid(values)
-#        tissue = tissue.keys()[i]
-
-def groupUtr3s(utr3s):
-    d = {}
-    for utr in utr3s:
-        if utr.name not in d:
-            d[utr.name] = [utr]
-            continue
-        d[utr.name].append(utr)
-    return d
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Given KLEAT files identify tissue-specific cleavage sites as well as differentially utilized sites')
-    parser.add_argument('kleats', nargs='+', help='One or more KLEAT files to analyze')
+    parser.add_argument('kleat_bed', help='A tabix-indexed BED file containing all KLEAT calls you wish to analyze from all tissues. The name column should be the same as the first column in the samplemap argument')
+    parser.add_argument('samplemap', help='A file mapping sample names to tissue site')
     parser.add_argument('-u', '--utr3s', default='/home/dmacmillan/annotations/ensembl/ensembl.fixed.sorted.utr3s_only.genes.sorted.gz', help='Bgzipped tabix-indexed BED file containing all viable 3\'UTRs to use')
+    parser.add_argument('-n', '--normalize', action='store_true', help='Normalize frequencies by number of samples in tissue')
     parser.add_argument('-e', '--exclude', default=[], nargs='+', help='Tissue types to exclude')
-    parser.add_argument('-s', '--samplemap', default=os.path.dirname(os.path.realpath(__file__))+'/samplemap', help='A file mapping sample names to tissue site')
-    parser.add_argument('-n', '--normalize', action='store_true', help='Enable this to randomly subsample all tissues to equal the minimum number of samples')
     parser.add_argument("-l", "--log", dest="logLevel", default='WARNING', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help='Set the logging level. Default = "WARNING"')
     parser.add_argument('-o', '--outdir', default=os.getcwd(), help='Path to output to. Default is {}'.format(os.getcwd()))
     
     args = parser.parse_args()
-    
+
     utr3s = pysam.tabix_iterator(open(args.utr3s), parser=pysam.asBed())
-    gutr3s = groupUtr3s(utr3s)
+
+    kleats = pysam.TabixFile(args.kleat_bed, parser=pysam.asBed())
 
     if not os.path.isdir(args.outdir):
         try:
@@ -105,102 +100,53 @@ if __name__ == '__main__':
     # Logging
     logging.basicConfig(filename=os.path.join(args.outdir, 'log_{}'.format(os.path.basename(__file__))), level=getattr(logging, args.logLevel), filemode='w')
 
-    kleats = []
     mapping = mapSamples(args.samplemap)
     logging.debug('mapping: {}'.format(mapping))
-    #logging.debug('mapping: {}'.format(mapping))
-    tissues = {}
-    #tissues = {x[1]:{'file': open(os.path.join(args.outdir, '{}.bg'.format(x[1])), 'w'), 'samples': set()} for x in mapping.items()}
-    #for tissue in args.exclude:
-    #    del(tissues[tissue])
-    n = len(args.kleats)
-    for i,k in enumerate(args.kleats):
-        sample = os.path.basename(k).split('.')[0]
-        logging.debug('sample: {}'.format(sample))
-        tissue = mapping[sample]
-        if tissue in args.exclude:
-            continue
-        if tissue not in tissues:
-            tissues[tissue] = {
-                'file': None,#open(os.path.join(args.outdir, '{}.bg'.format(tissue)), 'w'),
-                'samples': set()
-            }
-        tissues[tissue]['samples'].add(sample)
-        kleats += Kleat.parseKleatFast(k, sample)
-        sys.stdout.write('Processed {}/{}\r'.format(i+1,n))
-        sys.stdout.flush()
-    print
 
-    logging.debug('tissues: {}'.format(tissues))
-    tkeys = tissues.keys()
-    N = len(tissues)
-    hsv = [(x*1.0/N, 1, 1) for x in range(N)]
-    rgb = map(lambda x: colorsys.hsv_to_rgb(*x), hsv)
-    #for i,tissue in enumerate(tissues):
-    #    tissues[tissue]['file'].write('track type=\'bedGraph\' visibility=\'2\' name=\'{}\' color=\'{}\'\n'.format(tissue, (',').join([str(x*255) for x in rgb[i]])))
+    if args.normalize:
+        normalize = samplemapToTissueCount(mapping)
     
-    kleats = Kleat.groupKleat(kleats)
-
-    for chrom in kleats:
-        for gene in kleats[chrom]:
-            kleats[chrom][gene] = iterAHC(kleats[chrom][gene])
-            clusters = kleats[chrom][gene]
-            lclusters = len(clusters)
-            mtx = Matrix(N, lclusters)
-            centroids = []
-            myutr3 = None
-            for cluster in clusters:
-                values = [x.cleavage_site for x in cluster]
-                centroids.append(centroid(values))
-            try:
-                utrs = gutr3s[gene]
-            except KeyError:
-                continue
-            if len(utrs) > 1:
-                for u in utrs:
-                    if all([(u.start-20 <= x <= u.end+20) for x in centroids]):
-                        myutr3 = u
-            else:
-                myutr3 = utrs[0]
-                if not all([(myutr3.start-20 <= x <= myutr3.end+20) for x in centroids]):
+    for utr3 in utr3s:
+        logging.debug('utr3: {}'.format(utr3))
+        gene = utr3.name
+        logging.debug('gene: {}'.format(gene))
+        lutr3 = utr3.end - utr3.start
+        calls = [x for x in kleats.fetch(utr3.contig, utr3.start-20, utr3.end+20)]
+        tissues = {mapping[x.name]: None for x in calls}
+        tkeys = tissues.keys()
+        ltissues = len(tissues)
+        logging.debug('calls: {}'.format(calls))
+        clusters = iterAHC([x for x in calls])
+        lclusters = len(clusters)
+        mtx = Matrix(ltissues, lclusters)
+        centroids = []
+        for cluster in clusters:
+            values = [x.end for x in cluster]
+            centroids.append(centroid(values))
+        for i in xrange(mtx.m):
+            tissue = tkeys[i]
+            for j in xrange(mtx.n):
+                values = [x.end for x in clusters[j] if mapping[x.name] == tissue]
+                if not values:
                     continue
-            try:
-                lmyutr3 = myutr3.end - myutr3.start
-            except AttributeError:
-                continue
-            for i in xrange(mtx.m):
-                tissue = tkeys[i]
-                for j in xrange(mtx.n):
-                    values = [x.cleavage_site for x in clusters[j] if mapping[x.name] == tissue]
-                    if not values:
-                        continue
-                    cs = centroid(values)
-                    score = len(values)
-                    factor = len(tissues[tissue]['samples'])
-                    if args.normalize:
-                        score /= float(factor)
-                    #tissues[tissue]['file'].write('{}\t{}\t{}\t{}\n'.format(chrom, cs-1, cs, score))
-                    mtx.mtx[i][j] = score
-            mtx.rownames = [t.replace(' ', '_') for t in tissues.keys()]
-            #mtx.colnames = ['c{}_{}'.format(i, int(x)) for i,x in enumerate(centroids)]
-            if myutr3.strand == '+':
-                mtx.colnames = ['c_{}'.format(int(100*(x - myutr3.start)/(lmyutr3))) for x in centroids]
-            else:
-                mtx.colnames = ['c_{}'.format(int(100*(myutr3.end - x)/(lmyutr3))) for x in centroids]
-            for i in xrange(mtx.n):
-                col = mtx.col(i)
-                if len(col) - col.count(0) == 1:
-                    with open(os.path.join(args.outdir, gene), 'w') as f:
-                        f.write(str(mtx))
-                    path = os.path.abspath(args.outdir)
-                    if mtx.n == 1:
-                        rscript = genRHeatmap(gene, path, 'FALSE')
-                    else:
-                        rscript = genRHeatmap(gene, path)
-                    #print rscript
-                    #subprocess.Popen(['/gsc/btl/linuxbrew/bin/Rscript', rscript])
-#            deltas = Matrix(N, lclusters-1)
-#            for i in xrange(deltas.m):
-#                for j in xrange(deltas.n):
-#                    value = mtx.mtx[i][j+1] - mtx.mtx[i][j]
-#                    deltas.mtx[i][j] = value
+                cs = centroid(values)
+                score = len(values)
+                if args.normalize:
+                    score /= normalize[tissue]
+                mtx.mtx[i][j] = score
+        mtx.rownames = [t.replace(' ', '_') for t in tissues.keys()]
+        if utr3.strand == '+':
+            mtx.colnames = ['c_{}'.format(int(100*(x - utr3.start)/(lutr3))) for x in centroids]
+        else:
+            mtx.colnames = ['c_{}'.format(int(100*(utr3.end - x)/(lutr3))) for x in centroids]
+        for i in xrange(mtx.n):
+            col = mtx.col(i)
+            if len(col) - col.count(0) == 1:
+                gname = '{}_{}_{}'.format(gene, utr3.start, utr3.end)
+                with open(os.path.join(args.outdir, gname), 'w') as f:
+                    f.write(str(mtx))
+                path = os.path.abspath(args.outdir)
+                if mtx.n == 1:
+                    rscript = genRHeatmap(gname, path, 'FALSE')
+                else:
+                    rscript = genRHeatmap(gname, path)
